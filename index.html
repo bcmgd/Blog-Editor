@@ -84,6 +84,43 @@ body{background:#f8fafc;color:#1e293b;height:100vh;display:flex;flex-direction:c
 .modal-box label{font-size:13px;color:#64748b;display:block;margin-top:8px;}
 .modal-buttons{display:flex;gap:8px;justify-content:flex-end;margin-top:8px;}
 .modal-buttons button{padding:6px 12px;border-radius:6px;border:1px solid #cbd5e1;cursor:pointer;}
+  /* Toast 通知系统 - 右上角自动消失 */
+.toast-container {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+.toast-item {
+  padding: 12px 20px;
+  border-radius: 8px;
+  background: #1e293b;
+  color: #f8fafc;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  font-size: 14px;
+  max-width: 360px;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateX(20px);
+  animation: toastIn 0.3s forwards;
+  border-left: 4px solid #3b82f6;
+}
+.toast-item.success { border-left-color: #22c55e; }
+.toast-item.warning { border-left-color: #eab308; }
+.toast-item.error { border-left-color: #ef4444; }
+.toast-item.hiding {
+  animation: toastOut 0.3s forwards;
+}
+@keyframes toastIn {
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes toastOut {
+  to { opacity: 0; transform: translateX(20px); }
+}
 </style>
 </head>
 <body>
@@ -159,6 +196,161 @@ body{background:#f8fafc;color:#1e293b;height:100vh;display:flex;flex-direction:c
 </div>
 
 <script>
+// ========== 自动草稿兜底（LocalStorage 静默备份） ==========
+let autoSaveTimer = null;
+
+function autoSaveDraft() {
+  try {
+    const data = {
+      mode: currentMode,
+      md: mdEditor.value,
+      html: htmlEditor.value,
+      wysiwyg: wysiwygEditor.innerHTML,
+      timestamp: Date.now()
+    };
+    localStorage.setItem('blog_editor_autosave', JSON.stringify(data));
+    // 静默保存，不弹 Toast（避免干扰用户）
+  } catch (e) { /* 忽略存储异常 */ }
+}
+
+// 监听所有编辑器的输入事件（防抖 1 秒）
+[mdEditor, htmlEditor, wysiwygEditor].forEach(editor => {
+  editor.addEventListener('input', function() {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(autoSaveDraft, 1000);
+  });
+});
+
+// ========== 页面加载时恢复草稿（仅作为兜底） ==========
+(function restoreDraft() {
+  try {
+    const raw = localStorage.getItem('blog_editor_autosave');
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    const elapsed = Date.now() - data.timestamp;
+    if (elapsed > 86400000) { // 超过24小时自动清除
+      localStorage.removeItem('blog_editor_autosave');
+      return;
+    }
+    if (confirm('📝 检测到未保存的草稿 (来自 ' + new Date(data.timestamp).toLocaleString() + ')，是否恢复？')) {
+      mdEditor.value = data.md || '';
+      htmlEditor.value = data.html || '';
+      wysiwygEditor.innerHTML = data.wysiwyg || '';
+      if (data.mode) {
+        modeSelect.value = data.mode;
+        modeSelect.onchange();
+      }
+      updatePreview();
+      showToast('📂 草稿已恢复', 'success');
+      // 恢复后立即清除，避免下次加载再问（如果用户想保留，可以再次自动保存）
+      localStorage.removeItem('blog_editor_autosave');
+    } else {
+      localStorage.removeItem('blog_editor_autosave');
+    }
+  } catch(e) { /* 忽略解析错误 */ }
+})();
+
+// ========== Markdown 选中文字包裹工具 ==========
+function wrapMdSelection(editor, prefix, suffix) {
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  if (start === end) return false;
+  const text = editor.value;
+  const before = text.substring(0, start);
+  const selected = text.substring(start, end);
+  const after = text.substring(end);
+  editor.value = before + prefix + selected + suffix + after;
+  const newStart = start + prefix.length;
+  const newEnd = end + prefix.length;
+  editor.selectionStart = newStart;
+  editor.selectionEnd = newEnd;
+  return true;
+}
+
+// ========== 主动保存（Ctrl+S → 导出到本地磁盘） ==========
+function saveToDisk() {
+  if (currentMode === 'md') {
+    btnExportMd.click();
+    showToast('📄 Markdown 文件已保存', 'success');
+  } else {
+    // HTML 模式 或 WYSIWYG 模式都导出 HTML
+    btnExportHtml.click();
+    showToast('📄 HTML 文件已保存', 'success');
+  }
+}
+
+// ========== 全局快捷键监听 ==========
+document.addEventListener('keydown', function(e) {
+  const ctrl = e.ctrlKey || e.metaKey;
+  const tag = e.target.tagName;
+  const isInput = (tag === 'INPUT' || tag === 'TEXTAREA');
+
+  // ---- Ctrl+S：保存到本地磁盘（导出文件） ----
+  if (ctrl && e.key === 's') {
+    e.preventDefault();
+    saveToDisk();
+    return;
+  }
+
+  // ---- Ctrl+Shift+E：强制导出 Markdown（备用） ----
+  if (ctrl && e.shiftKey && e.key === 'E') {
+    e.preventDefault();
+    btnExportMd.click();
+    showToast('📤 正在导出 Markdown...', 'info');
+    return;
+  }
+
+  // ---- Markdown 编辑器专属：Ctrl+B 加粗，Ctrl+I 斜体 ----
+  if (currentMode === 'md' && isInput && e.target === mdEditor) {
+    if (ctrl && e.key === 'b') {
+      e.preventDefault();
+      if (wrapMdSelection(mdEditor, '**', '**')) updatePreview();
+      return;
+    }
+    if (ctrl && e.key === 'i') {
+      e.preventDefault();
+      if (wrapMdSelection(mdEditor, '*', '*')) updatePreview();
+      return;
+    }
+  }
+
+  // 其他输入框不拦截
+  if (isInput) return;
+
+  // ---- WYSIWYG 模式专属 ----
+  if (currentMode === 'wysiwyg') {
+    if (ctrl && !e.shiftKey) {
+      if (e.key === '1') { e.preventDefault(); document.execCommand('formatBlock', false, '<h1>'); syncToolbarState(); updatePreview(); return; }
+      if (e.key === '2') { e.preventDefault(); document.execCommand('formatBlock', false, '<h2>'); syncToolbarState(); updatePreview(); return; }
+      if (e.key === '3') { e.preventDefault(); document.execCommand('formatBlock', false, '<h3>'); syncToolbarState(); updatePreview(); return; }
+    }
+    if (ctrl && e.key === 'k') {
+      e.preventDefault();
+      btnLink.click();
+      return;
+    }
+  }
+});
+  // ========== Toast 通知系统 ==========
+function showToast(message, type = 'info', duration = 3000) {
+  const container = document.getElementById('toastContainer') || (() => {
+    const div = document.createElement('div');
+    div.id = 'toastContainer';
+    div.className = 'toast-container';
+    document.body.appendChild(div);
+    return div;
+  })();
+
+  const item = document.createElement('div');
+  item.className = `toast-item ${type}`;
+  item.textContent = message;
+  container.appendChild(item);
+
+  setTimeout(() => {
+    item.classList.add('hiding');
+    setTimeout(() => item.remove(), 300);
+  }, duration);
+}
 // 简易md转html（够用博客场景）
 function mdToHtml(md){
   let html = md
